@@ -17,12 +17,7 @@ from model import build_model
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Faster R-CNN on OCT data")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=Path("/home/suraj/Data/Nemours/pickle/"),
-        help="Root directory containing .pkl files",
-    )
+    parser.add_argument("--data-root", type=Path, required=True, help="Root directory containing .pkl files")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--val-ratio", type=float, default=0.2)

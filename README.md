@@ -21,14 +21,10 @@ Minimal Faster R-CNN training and inference pipeline for retinal OCT B-scan obje
 - Device selection uses `torch.device("cuda" if torch.cuda.is_available() else "cpu")` and will run on AMD GPUs with ROCm if available.
 
 ## Training
-1. Place all `.pkl` files under a directory (files can be nested; they are discovered recursively). The current default is `/home/suraj/Data/Nemours/pickle/`.
+1. Place all `.pkl` files under a directory (files can be nested; they are discovered recursively).
 2. Run training (example):
    ```bash
-   python train.py --epochs 10 --batch-size 2 --val-ratio 0.2 --output-dir checkpoints
-   ```
-   If your pickle directory differs, override the path:
-   ```bash
-   python train.py --data-root /your/custom/path --epochs 10 --batch-size 2 --val-ratio 0.2 --output-dir checkpoints
+   python train.py --data-root /path/to/pkl/files --epochs 10 --batch-size 2 --val-ratio 0.2 --output-dir checkpoints
    ```
 3. Printed metrics per epoch include average losses (`loss`, `loss_classifier`, `loss_box_reg`, `loss_objectness`, `loss_rpn_box_reg`) and validation precision/recall/F1 at IoU ≥ 0.5.
 4. The best model by validation F1 is saved to `<output-dir>/best_model.pth` together with the label mapping used for the run.
