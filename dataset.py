@@ -142,14 +142,26 @@ class OCTDetectionDataset(Dataset):
 
         # Prepare image tensor
         image_tensor = torch.from_numpy(image_np).float()
+        
+        # Normalize to [0, 1] range
+        if image_tensor.max() > 1.0:
+            image_tensor = image_tensor / 255.0
+        
+        # Handle different image formats: HW, CHW, or HWC
         if image_tensor.ndim == 2:
+            # Grayscale (H, W) -> add channel dimension
             image_tensor = image_tensor.unsqueeze(0)
-        elif image_tensor.ndim == 3 and image_tensor.shape[0] != 1:
-            # Assume HWC
-            image_tensor = image_tensor.permute(2, 0, 1)
+        elif image_tensor.ndim == 3:
+            # Check if it's HWC (height, width, channels) format
+            if image_tensor.shape[2] in [1, 3] and image_tensor.shape[0] > 3:
+                # Likely HWC format, convert to CHW
+                image_tensor = image_tensor.permute(2, 0, 1)
+        
+        # Convert to 3-channel RGB if needed
         if image_tensor.shape[0] == 1:
             image_tensor = image_tensor.repeat(3, 1, 1)
-        image_tensor = image_tensor / 255.0
+        elif image_tensor.shape[0] != 3:
+            raise ValueError(f"Unexpected number of channels: {image_tensor.shape[0]}")
 
         boxes_tensor = torch.from_numpy(boxes_np).float()
         labels_tensor = torch.from_numpy(labels_np).long()
