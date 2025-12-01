@@ -41,24 +41,37 @@ def _extract_arrays(sample: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     else:
         raise KeyError("Sample must contain 'image' or 'img' key")
 
+    # Convert torch tensors to numpy if needed
+    if hasattr(image, 'numpy'):
+        image = image.numpy()
     image = np.asarray(image, dtype=np.float32)
 
-    # Boxes retrieval
+    # Boxes retrieval - NOTE: singular 'box' is the correct key name!
     if "boxes" in sample:
         boxes = sample["boxes"]
     elif "bboxes" in sample:
         boxes = sample["bboxes"]
+    elif "box" in sample:  # DEBUG: Added support for singular 'box' key
+        boxes = sample["box"]
     else:
         boxes = np.zeros((0, 4), dtype=np.float32)
 
+    # Convert torch tensors to numpy if needed
+    if hasattr(boxes, 'numpy'):
+        boxes = boxes.numpy()
     boxes = np.asarray(boxes, dtype=np.float32)
 
-    # Labels retrieval
+    # Labels retrieval - NOTE: singular 'label' is the correct key name!
     if "labels" in sample:
         labels = sample["labels"]
+    elif "label" in sample:  # DEBUG: Added support for singular 'label' key
+        labels = sample["label"]
     else:
         labels = np.zeros((boxes.shape[0],), dtype=np.int64)
 
+    # Convert torch tensors to numpy if needed
+    if hasattr(labels, 'numpy'):
+        labels = labels.numpy()
     labels = np.asarray(labels, dtype=np.int64)
     return image, boxes, labels
 
@@ -129,10 +142,42 @@ class OCTDetectionDataset(Dataset):
         if labels_np.shape[0] != boxes_np.shape[0]:
             raise ValueError(f"Mismatched labels and boxes for {path}")
 
-        # Filter out ignored labels
-        valid_mask = labels_np != 2
+        # Filter out boxes with all zeros (invalid/padding boxes)
+        # Also filter label=2 (ignore label) and label=0 (background/negative)
+        valid_mask = np.ones(len(boxes_np), dtype=bool)
+        
+        # Remove boxes that are all zeros
+        zero_boxes = np.all(boxes_np == 0, axis=1)
+        valid_mask &= ~zero_boxes
+        
+        # Remove ignore label (2) - this appears to be "no pathology" or similar
+        valid_mask &= (labels_np != 2)
+        
+        # Remove background/negative label (0) - this appears to be non-target regions
+        valid_mask &= (labels_np != 0)
+        
         boxes_np = boxes_np[valid_mask]
         labels_np = labels_np[valid_mask]
+        
+        # Convert boxes from [x_center, y_center, width, height] to [x1, y1, x2, y2]
+        # The data format is: [cx, cy, w, h] where all values are normalized [0, 1]
+        # Convert to pixel coordinates for Faster R-CNN
+        if boxes_np.shape[0] > 0:
+            # Get image dimensions (after conversion to CHW format)
+            img_height, img_width = image_np.shape[1], image_np.shape[2] if image_np.ndim == 3 else (image_np.shape[0], image_np.shape[1])
+            
+            cx, cy, w, h = boxes_np[:, 0], boxes_np[:, 1], boxes_np[:, 2], boxes_np[:, 3]
+            x1 = (cx - w / 2) * img_width
+            y1 = (cy - h / 2) * img_height
+            x2 = (cx + w / 2) * img_width
+            y2 = (cy + h / 2) * img_height
+            boxes_np = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+            
+            # Clamp boxes to image boundaries
+            boxes_np[:, 0] = np.clip(boxes_np[:, 0], 0, img_width)
+            boxes_np[:, 1] = np.clip(boxes_np[:, 1], 0, img_height)
+            boxes_np[:, 2] = np.clip(boxes_np[:, 2], 0, img_width)
+            boxes_np[:, 3] = np.clip(boxes_np[:, 3], 0, img_height)
 
         # Remap labels to contiguous values starting at 1
         if self.label_mapping:

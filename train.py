@@ -98,7 +98,7 @@ def train_one_epoch(
     num_batches = 0
     
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
-    for images, targets in progress_bar:
+    for batch_idx, (images, targets) in enumerate(progress_bar):
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
