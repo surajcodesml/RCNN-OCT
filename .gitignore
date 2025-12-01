@@ -1,0 +1,111 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Model checkpoints and training outputs
+checkpoints/
+checkpoints_*/
+run*/
+logs/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# Data files
+data/
+Data/
+*.pkl
+*.pickle
+*.npz
+*.npy
+*.csv
+*.json
+*.mat
+
+# Images and visualizations
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.pdf
+
+# Exception: Keep example/demo files if any
+!example.png
+!demo.jpg
+
+# Test outputs
+test_*.png
+prediction*.png
+*_results/
+output_plots/
+inference_results/
+
+# System files
+.cache/
+*.log
+*.out
+*.err
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Environment variables
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp

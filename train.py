@@ -25,7 +25,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=Path("checkpoints"))
-    parser.add_argument("--score-threshold", type=float, default=0.5)
+    parser.add_argument("--score-threshold", type=float, default=0.05,
+                        help="Score threshold for predictions during evaluation (default: 0.05)")
+    parser.add_argument("--filter-empty", type=float, default=0.0, 
+                        help="Fraction of empty images (no boxes) to remove from training set. "
+                             "0.0=keep all (default), 0.5=remove 50%%, 1.0=remove all empty images")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Limit total number of samples for quick testing. None=use all (default)")
     return parser.parse_args()
 
 
@@ -45,45 +51,140 @@ def compute_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
     return inter_area / union if union > 0 else 0.0
 
 
+def compute_ap(precisions: np.ndarray, recalls: np.ndarray) -> float:
+    """Compute Average Precision using 11-point interpolation."""
+    ap = 0.0
+    for t in np.arange(0, 1.1, 0.1):
+        if np.sum(recalls >= t) == 0:
+            p = 0
+        else:
+            p = np.max(precisions[recalls >= t])
+        ap += p / 11.0
+    return ap
+
+
 def evaluate(
     model: torch.nn.Module,
     dataloader: DataLoader,
     device: torch.device,
-    score_threshold: float = 0.5,
+    score_threshold: float = 0.05,
 ) -> Dict[str, float]:
+    """Evaluate model and compute precision, recall, F1, and mAP."""
     model.eval()
-    tp = fp = fn = 0
+    
+    # Collect all predictions and ground truths
+    all_pred_boxes = []
+    all_pred_scores = []
+    all_gt_boxes = []
+    
     with torch.no_grad():
         for images, targets in dataloader:
             images = [img.to(device) for img in images]
             outputs = model(images)
+            
             for output, target in zip(outputs, targets):
-                scores = output["scores"].cpu().numpy()
-                keep = scores >= score_threshold
-                pred_boxes = output["boxes"].cpu().numpy()[keep]
+                pred_boxes = output["boxes"].cpu().numpy()
+                pred_scores = output["scores"].cpu().numpy()
                 gt_boxes = target["boxes"].cpu().numpy()
-
-                matched_gt = set()
-                for pred_box in pred_boxes:
-                    ious = [compute_iou(pred_box, gt_box) for gt_box in gt_boxes]
-                    if not ious:
-                        fp += 1
-                        continue
-                    best_idx = int(np.argmax(ious))
-                    if ious[best_idx] >= 0.5 and best_idx not in matched_gt:
-                        tp += 1
-                        matched_gt.add(best_idx)
-                    else:
-                        fp += 1
-                fn += max(len(gt_boxes) - len(matched_gt), 0)
-
+                
+                all_pred_boxes.append(pred_boxes)
+                all_pred_scores.append(pred_scores)
+                all_gt_boxes.append(gt_boxes)
+    
+    # Compute metrics at IoU=0.5
+    tp = fp = fn = 0
+    total_preds = 0
+    
+    for pred_boxes, pred_scores, gt_boxes in zip(all_pred_boxes, all_pred_scores, all_gt_boxes):
+        # Filter by score threshold
+        keep = pred_scores >= score_threshold
+        pred_boxes_filtered = pred_boxes[keep]
+        
+        total_preds += len(pred_boxes_filtered)
+        
+        matched_gt = set()
+        for pred_box in pred_boxes_filtered:
+            if len(gt_boxes) == 0:
+                fp += 1
+                continue
+                
+            ious = [compute_iou(pred_box, gt_box) for gt_box in gt_boxes]
+            best_idx = int(np.argmax(ious))
+            
+            if ious[best_idx] >= 0.5 and best_idx not in matched_gt:
+                tp += 1
+                matched_gt.add(best_idx)
+            else:
+                fp += 1
+        
+        fn += len(gt_boxes) - len(matched_gt)
+    
+    # Compute mAP@0.5
+    # Sort all predictions by score
+    all_pred_data = []
+    for pred_boxes, pred_scores, gt_boxes in zip(all_pred_boxes, all_pred_scores, all_gt_boxes):
+        for box, score in zip(pred_boxes, pred_scores):
+            all_pred_data.append((score, box, gt_boxes))
+    
+    all_pred_data.sort(key=lambda x: x[0], reverse=True)
+    
+    # Compute precision-recall curve
+    tp_curve = 0
+    fp_curve = 0
+    precisions = []
+    recalls = []
+    total_gt = sum(len(gt) for gt in all_gt_boxes)
+    
+    matched_gts = [set() for _ in all_gt_boxes]
+    
+    for score, pred_box, gt_boxes in all_pred_data:
+        # Find which image this prediction belongs to
+        gt_idx = -1
+        for i, gts in enumerate(all_gt_boxes):
+            if np.array_equal(gt_boxes, gts):
+                gt_idx = i
+                break
+        
+        if len(gt_boxes) == 0:
+            fp_curve += 1
+        else:
+            ious = [compute_iou(pred_box, gt_box) for gt_box in gt_boxes]
+            best_idx = int(np.argmax(ious))
+            
+            if ious[best_idx] >= 0.5 and best_idx not in matched_gts[gt_idx]:
+                tp_curve += 1
+                matched_gts[gt_idx].add(best_idx)
+            else:
+                fp_curve += 1
+        
+        precision = tp_curve / (tp_curve + fp_curve) if (tp_curve + fp_curve) > 0 else 0.0
+        recall = tp_curve / total_gt if total_gt > 0 else 0.0
+        precisions.append(precision)
+        recalls.append(recall)
+    
+    # Compute mAP
+    if len(precisions) > 0:
+        precisions = np.array(precisions)
+        recalls = np.array(recalls)
+        mAP = compute_ap(precisions, recalls)
+    else:
+        mAP = 0.0
+    
+    # Final metrics
     precision = tp / (tp + fp) if tp + fp > 0 else 0.0
     recall = tp / (tp + fn) if tp + fn > 0 else 0.0
-    if precision + recall == 0:
-        f1 = 0.0
-    else:
-        f1 = 2 * precision * recall / (precision + recall)
-    return {"precision": precision, "recall": recall, "f1": f1, "tp": tp, "fp": fp, "fn": fn}
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "mAP": mAP,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "total_predictions": total_preds,
+    }
 
 
 def train_one_epoch(
@@ -109,6 +210,7 @@ def train_one_epoch(
         losses.backward()
         optimizer.step()
 
+        # Accumulate all loss components
         for key in loss_accum:
             loss_accum[key] += loss_dict.get(key, torch.tensor(0.0, device=device)).item()
         num_batches += 1
@@ -118,6 +220,10 @@ def train_one_epoch(
 
     for key in loss_accum:
         loss_accum[key] /= max(num_batches, 1)
+    
+    # Compute total loss as sum of all components
+    loss_accum["loss"] = sum(loss_accum[k] for k in loss_accum if k != "loss")
+    
     return loss_accum
 
 #Function to save training results to JSON
@@ -145,7 +251,13 @@ def main() -> None:
     print(f"Using device: {device}")
 
     print(f"Loading datasets from {args.data_root}...")
-    train_dataset, val_dataset, label_mapping = create_datasets(args.data_root, val_ratio=args.val_ratio, seed=args.seed)
+    train_dataset, val_dataset, label_mapping = create_datasets(
+        args.data_root, 
+        val_ratio=args.val_ratio, 
+        seed=args.seed,
+        filter_empty_ratio=args.filter_empty,
+        max_samples=args.max_samples
+    )
     num_classes = len(label_mapping) + 1 if label_mapping else 2
 
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
@@ -190,6 +302,7 @@ def main() -> None:
         "val_ratio": args.val_ratio,
         "seed": args.seed,
         "score_threshold": args.score_threshold,
+        "filter_empty_ratio": args.filter_empty,
         "learning_rate": 0.005,
         "momentum": 0.9,
         "weight_decay": 5e-4,
@@ -221,9 +334,11 @@ def main() -> None:
             "val_precision": val_metrics["precision"],
             "val_recall": val_metrics["recall"],
             "val_f1": val_metrics["f1"],
+            "val_mAP": val_metrics["mAP"],
             "val_tp": val_metrics["tp"],
             "val_fp": val_metrics["fp"],
             "val_fn": val_metrics["fn"],
+            "val_total_predictions": val_metrics["total_predictions"],
         }
         training_history.append(epoch_results)
         
@@ -236,8 +351,9 @@ def main() -> None:
             f"rpn_box={loss_dict['loss_rpn_box_reg']:.4f} | "  
             f"P={val_metrics['precision']:.4f}, "
             f"R={val_metrics['recall']:.4f}, "
-            f"F1={val_metrics['f1']:.4f} "
-            f"(TP={val_metrics['tp']}, FP={val_metrics['fp']}, FN={val_metrics['fn']})" 
+            f"F1={val_metrics['f1']:.4f}, "
+            f"mAP={val_metrics['mAP']:.4f} "
+            f"(TP={val_metrics['tp']}, FP={val_metrics['fp']}, FN={val_metrics['fn']}, Preds={val_metrics['total_predictions']})" 
         )
 
         if val_metrics["f1"] > best_f1:
@@ -262,6 +378,7 @@ def main() -> None:
         "final_val_precision": training_history[-1]["val_precision"],
         "final_val_recall": training_history[-1]["val_recall"],
         "final_val_f1": training_history[-1]["val_f1"],
+        "final_val_mAP": training_history[-1]["val_mAP"],
     }
 
     save_training_results(args.output_dir, hyperparameters, training_history, best_metrics)

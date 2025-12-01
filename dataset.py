@@ -81,10 +81,11 @@ def build_label_mapping(files: Sequence[Path], ignore_label: int | None = 2) -> 
 
     Args:
         files: Iterable of pickle file paths.
-        ignore_label: Label value to skip when computing classes.
+        ignore_label: Label value to skip when computing classes (default: 2 for "no boxes").
 
     Returns:
         Mapping from original labels to contiguous values starting at 1.
+        Example: {0: 1, 1: 2} means Fovea→class1, SCR→class2
     """
     label_set: set[int] = set()
     for path in files:
@@ -125,12 +126,82 @@ class OCTDetectionDataset(Dataset):
         files: Sequence[Path],
         label_mapping: Dict[int, int] | None = None,
         transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        filter_empty_ratio: float = 0.0,
+        seed: int = 42,
     ) -> None:
-        self.files = list(files)
+        """
+        Args:
+            files: List of pickle file paths
+            label_mapping: Mapping from original labels to contiguous class IDs
+            transform: Optional transform to apply to images
+            filter_empty_ratio: Fraction of empty images (no boxes) to remove (0.0-1.0).
+                               0.0 = keep all images, 0.5 = remove 50% of empty images,
+                               1.0 = remove all empty images
+            seed: Random seed for reproducible filtering
+        """
         self.transform = transform
-        self.label_mapping = label_mapping if label_mapping is not None else build_label_mapping(self.files)
+        self.label_mapping = label_mapping if label_mapping is not None else build_label_mapping(files)
         self.num_classes = len(self.label_mapping) + 1 if self.label_mapping else 2
+        
+        # Filter empty images if requested
+        if filter_empty_ratio > 0.0:
+            self.files = self._filter_empty_images(files, filter_empty_ratio, seed)
+        else:
+            self.files = list(files)
 
+    def _filter_empty_images(self, files: Sequence[Path], filter_ratio: float, seed: int) -> List[Path]:
+        """Filter out a percentage of images without bounding boxes.
+        
+        Args:
+            files: All pickle file paths
+            filter_ratio: Fraction of empty images to remove (0.0-1.0)
+            seed: Random seed for reproducibility
+            
+        Returns:
+            Filtered list of file paths with some empty images removed
+        """
+        rng = np.random.default_rng(seed)
+        files_with_boxes = []
+        files_without_boxes = []
+        
+        print(f"Filtering empty images (removing {filter_ratio*100:.0f}% of images without boxes)...")
+        
+        for path in files:
+            sample = _load_pickle(path)
+            _, boxes_np, labels_np = _extract_arrays(sample)
+            
+            # Check if file has any valid boxes (non-zero boxes with valid labels)
+            # Label 0 = Fovea (valid), Label 1 = SCR (valid), Label 2 = No boxes (invalid)
+            valid_mask = np.ones(len(boxes_np), dtype=bool)
+            zero_boxes = np.all(boxes_np == 0, axis=1) if boxes_np.size > 0 else np.array([], dtype=bool)
+            valid_mask &= ~zero_boxes if zero_boxes.size > 0 else True
+            # Only filter out label=2 (no boxes)
+            valid_mask &= (labels_np != 2) if labels_np.size > 0 else True
+            
+            has_boxes = np.any(valid_mask)
+            
+            if has_boxes:
+                files_with_boxes.append(path)
+            else:
+                files_without_boxes.append(path)
+        
+        # Keep all files with boxes
+        kept_files = files_with_boxes.copy()
+        
+        # Keep only (1 - filter_ratio) of files without boxes
+        num_empty_to_keep = int(len(files_without_boxes) * (1.0 - filter_ratio))
+        if num_empty_to_keep > 0:
+            # Randomly select which empty files to keep
+            indices = rng.choice(len(files_without_boxes), size=num_empty_to_keep, replace=False)
+            kept_empty = [files_without_boxes[i] for i in sorted(indices)]
+            kept_files.extend(kept_empty)
+        
+        print(f"  Files with boxes: {len(files_with_boxes)} (kept all)")
+        print(f"  Files without boxes: {len(files_without_boxes)} (kept {num_empty_to_keep}, removed {len(files_without_boxes) - num_empty_to_keep})")
+        print(f"  Total files: {len(files)} → {len(kept_files)}")
+        
+        return sorted(kept_files)
+    
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self.files)
 
@@ -143,18 +214,16 @@ class OCTDetectionDataset(Dataset):
             raise ValueError(f"Mismatched labels and boxes for {path}")
 
         # Filter out boxes with all zeros (invalid/padding boxes)
-        # Also filter label=2 (ignore label) and label=0 (background/negative)
+        # Only filter label=2 which means "no bounding boxes"
+        # Label 0 = Fovea (KEEP), Label 1 = SCR (KEEP), Label 2 = No boxes (REMOVE)
         valid_mask = np.ones(len(boxes_np), dtype=bool)
         
-        # Remove boxes that are all zeros
+        # Remove boxes that are all zeros (invalid/padding boxes)
         zero_boxes = np.all(boxes_np == 0, axis=1)
         valid_mask &= ~zero_boxes
         
-        # Remove ignore label (2) - this appears to be "no pathology" or similar
+        # Remove only label=2 (no bounding boxes / ignore)
         valid_mask &= (labels_np != 2)
-        
-        # Remove background/negative label (0) - this appears to be non-target regions
-        valid_mask &= (labels_np != 0)
         
         boxes_np = boxes_np[valid_mask]
         labels_np = labels_np[valid_mask]
@@ -163,8 +232,12 @@ class OCTDetectionDataset(Dataset):
         # The data format is: [cx, cy, w, h] where all values are normalized [0, 1]
         # Convert to pixel coordinates for Faster R-CNN
         if boxes_np.shape[0] > 0:
-            # Get image dimensions (after conversion to CHW format)
-            img_height, img_width = image_np.shape[1], image_np.shape[2] if image_np.ndim == 3 else (image_np.shape[0], image_np.shape[1])
+            # Get image dimensions - image_np is in CHW format (3, H, W)
+            if image_np.ndim == 3:
+                img_height, img_width = image_np.shape[1], image_np.shape[2]
+            else:
+                # Fallback for HW format
+                img_height, img_width = image_np.shape[0], image_np.shape[1]
             
             cx, cy, w, h = boxes_np[:, 0], boxes_np[:, 1], boxes_np[:, 2], boxes_np[:, 3]
             x1 = (cx - w / 2) * img_width
@@ -248,11 +321,37 @@ def create_datasets(
     root: Path,
     val_ratio: float = 0.2,
     seed: int = 42,
+    filter_empty_ratio: float = 0.0,
+    max_samples: int | None = None,
 ) -> Tuple[OCTDetectionDataset, OCTDetectionDataset, Dict[int, int]]:
-    """Create train and validation datasets with a deterministic split."""
+    """Create train and validation datasets with a deterministic split.
+    
+    Args:
+        root: Root directory containing pickle files
+        val_ratio: Fraction of data to use for validation
+        seed: Random seed for reproducibility
+        filter_empty_ratio: Fraction of empty images (no boxes) to remove from training set.
+                          0.0 = keep all images (default), 0.5 = remove 50% of empty images
+    
+    Returns:
+        Tuple of (train_dataset, val_dataset, label_mapping)
+    """
     files = find_pkl_files(root)
-    train_files, val_files = split_files(files, val_ratio=val_ratio, seed=seed)
-    label_mapping = build_label_mapping(files)
-    train_dataset = OCTDetectionDataset(train_files, label_mapping)
-    val_dataset = OCTDetectionDataset(val_files, label_mapping)
+    
+    # Limit samples for testing if requested
+    if max_samples is not None and max_samples > 0:
+        files = files[:max_samples]
+        print(f"Limited to {len(files)} samples for testing")
+    
+    label_mapping = build_label_mapping(files, ignore_label=2)  # Ignore label 2 (no boxes)
+    train_files, val_files = split_files(files, val_ratio, seed)
+    
+    # Apply filtering only to training set, keep validation set intact for fair evaluation
+    train_dataset = OCTDetectionDataset(
+        train_files, 
+        label_mapping, 
+        filter_empty_ratio=filter_empty_ratio, 
+        seed=seed)
+    val_dataset = OCTDetectionDataset(val_files, label_mapping, filter_empty_ratio=0.0)  # Never filter validation
+    
     return train_dataset, val_dataset, label_mapping

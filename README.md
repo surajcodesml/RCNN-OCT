@@ -11,10 +11,14 @@ Minimal Faster R-CNN training and inference pipeline for retinal OCT B-scan obje
 ## Data format
 - Each `.pkl` file represents one 2D OCT B-scan and includes at least an `image` (or `img`) array, `boxes`, and `labels`.
 - Filenames follow `patientID_LorR_instance_instanceNumber_bscanNumber.pkl` (e.g., `6_R_1_1001.pkl`). Each file is treated as an independent example even though volumes contain 31 B-scans.
-- Bounding boxes are pixel coordinates `[x_min, y_min, x_max, y_max]`.
-- Default label handling:
-  - Labels equal to `2` are ignored when building training targets.
-  - Remaining labels are remapped to contiguous values starting at `1`; background is handled internally by the model.
+- Images are stored as tensors with shape `(3, H, W)` in the range [0, 1] (typically 256×576 pixels).
+- Bounding boxes are in **YOLO format** `[x_center, y_center, width, height]` with normalized coordinates [0, 1].
+  - The dataset automatically converts these to corner format `[x1, y1, x2, y2]` in pixel coordinates for Faster R-CNN.
+- Label handling:
+  - **Original labels**: 0=Fovea, 1=SCR, 2=No boxes (ignored)
+  - **Remapped for model**: Background=0 (automatic), Fovea=1, SCR=2
+  - Label 2 ("no boxes") is filtered out during data loading
+  - The model predicts 3 classes total: Background (0), Fovea (1), and SCR (2)
 
 ## Environment
 - Python 3.10+, PyTorch with ROCm support, torchvision, numpy, matplotlib.
