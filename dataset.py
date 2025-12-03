@@ -355,3 +355,53 @@ def create_datasets(
     val_dataset = OCTDetectionDataset(val_files, label_mapping, filter_empty_ratio=0.0)  # Never filter validation
     
     return train_dataset, val_dataset, label_mapping
+
+
+def create_datasets_from_splits(
+    splits_path: Path,
+    split_names: Tuple[str, ...] = ("train", "val"),
+    filter_empty_ratio: float = 0.0,
+    seed: int = 42,
+) -> Tuple[OCTDetectionDataset, ...]:
+    """Create datasets from pre-defined splits JSON file.
+    
+    Args:
+        splits_path: Path to splits.json file
+        split_names: Names of splits to load (e.g., ("train", "val") or ("train", "val", "test"))
+        filter_empty_ratio: Fraction of empty images to remove from first split only (usually training)
+        seed: Random seed for filtering reproducibility
+    
+    Returns:
+        Tuple of datasets and label_mapping: (dataset1, dataset2, ..., label_mapping)
+    """
+    import json
+    
+    with open(splits_path, "r") as f:
+        splits = json.load(f)
+    
+    # Collect all files to build label mapping
+    all_files = []
+    for split_name in split_names:
+        if split_name not in splits:
+            raise ValueError(f"Split '{split_name}' not found in {splits_path}")
+        all_files.extend([Path(f) for f in splits[split_name]])
+    
+    label_mapping = build_label_mapping(all_files, ignore_label=2)
+    
+    # Create datasets for each split
+    datasets = []
+    for idx, split_name in enumerate(split_names):
+        files = [Path(f) for f in splits[split_name]]
+        
+        # Only apply filtering to first split (training)
+        filter_ratio = filter_empty_ratio if idx == 0 else 0.0
+        
+        dataset = OCTDetectionDataset(
+            files,
+            label_mapping,
+            filter_empty_ratio=filter_ratio,
+            seed=seed
+        )
+        datasets.append(dataset)
+    
+    return tuple(datasets) + (label_mapping,)

@@ -13,13 +13,14 @@ from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 
-from dataset import OCTDetectionDataset, create_datasets, detection_collate_fn
+from dataset import OCTDetectionDataset, create_datasets, create_datasets_from_splits, detection_collate_fn
 from model import build_model
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Faster R-CNN on OCT data")
     parser.add_argument("--data-root", type=Path, required=False, default=Path("/home/suraj/Data/Nemours/pickle"), help="Root directory containing .pkl files")
+    parser.add_argument("--splits-file", type=Path, default=None, help="Path to splits.json file (if provided, uses predefined splits)")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--val-ratio", type=float, default=0.2)
@@ -251,13 +252,26 @@ def main() -> None:
     print(f"Using device: {device}")
 
     print(f"Loading datasets from {args.data_root}...")
-    train_dataset, val_dataset, label_mapping = create_datasets(
-        args.data_root, 
-        val_ratio=args.val_ratio, 
-        seed=args.seed,
-        filter_empty_ratio=args.filter_empty,
-        max_samples=args.max_samples
-    )
+    
+    # Use splits file if provided, otherwise use random split
+    if args.splits_file is not None and args.splits_file.exists():
+        print(f"Using predefined splits from {args.splits_file}")
+        train_dataset, val_dataset, label_mapping = create_datasets_from_splits(
+            args.splits_file,
+            split_names=("train", "val"),
+            filter_empty_ratio=args.filter_empty,
+            seed=args.seed
+        )
+    else:
+        print(f"Using random split with val_ratio={args.val_ratio}")
+        train_dataset, val_dataset, label_mapping = create_datasets(
+            args.data_root, 
+            val_ratio=args.val_ratio, 
+            seed=args.seed,
+            filter_empty_ratio=args.filter_empty,
+            max_samples=args.max_samples
+        )
+    
     num_classes = len(label_mapping) + 1 if label_mapping else 2
 
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
