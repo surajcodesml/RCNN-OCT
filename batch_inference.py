@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 import torch
+import yaml
 from tqdm import tqdm
 
 from dataset import create_datasets_from_splits
@@ -374,6 +375,12 @@ def batch_inference(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch inference with metrics for OCT detection")
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Path to config YAML file (default: config.yaml)"
+    )
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         required=True,
@@ -382,41 +389,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--splits-file",
         type=Path,
-        default=Path("/home/suraj/Git/RCNN-OCT/splits.json"),
-        help="Path to splits.json file"
+        default=None,
+        help="Path to splits.json file (overrides config)"
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("inference"),
-        help="Directory to save results (default: inference/)"
+        default=None,
+        help="Directory to save results (overrides config)"
     )
     parser.add_argument(
         "--score-threshold",
         type=float,
-        default=0.5,
-        help="Score threshold for predictions (default: 0.5)"
+        default=None,
+        help="Score threshold for predictions (overrides config)"
     )
     parser.add_argument(
         "--visualize-samples",
         type=int,
-        default=10,
-        help="Number of samples to visualize (default: 10)"
+        default=None,
+        help="Number of samples to visualize (overrides config)"
     )
     return parser.parse_args()
+
+
+def load_config(config_path: Path) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 
 def main() -> None:
     args = parse_args()
     
+    # Load configuration
+    config = load_config(args.config)
+    print(f"Loaded configuration from {args.config}")
+    
+    # Override config with command line arguments
+    splits_file = args.splits_file if args.splits_file else Path(config["data"]["splits_file"])
+    output_dir = args.output_dir if args.output_dir else Path(config["output"]["inference_dir"])
+    score_threshold = args.score_threshold if args.score_threshold is not None else config["inference"]["score_threshold"]
+    visualize_samples = args.visualize_samples if args.visualize_samples is not None else config["inference"]["visualize_samples"]
+    
     # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and config["device"]["cuda"] else "cpu")
     print(f"Using device: {device}")
     
+    # Verify splits file exists
+    if not splits_file.exists():
+        raise FileNotFoundError(
+            f"Splits file not found: {splits_file}\n"
+            f"Please run 'python split.py' first to generate the splits."
+        )
+    
     # Load test dataset
-    print(f"Loading test dataset from {args.splits_file}...")
+    print(f"Loading test dataset from {splits_file}...")
     test_dataset, label_mapping = create_datasets_from_splits(
-        args.splits_file,
+        splits_file,
         split_names=("test",),
         filter_empty_ratio=0.0,
     )
@@ -433,9 +463,9 @@ def main() -> None:
         model=model,
         test_dataset=test_dataset,
         device=device,
-        score_threshold=args.score_threshold,
-        output_dir=args.output_dir,
-        visualize_samples=args.visualize_samples,
+        score_threshold=score_threshold,
+        output_dir=output_dir,
+        visualize_samples=visualize_samples,
     )
 
 

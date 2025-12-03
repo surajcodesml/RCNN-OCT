@@ -3,86 +3,79 @@
 ## Overview
 This document describes the complete workflow for training and evaluating the Faster R-CNN model on OCT B-scan data.
 
+**NEW**: All scripts now use a centralized `config.yaml` file. See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for details.
+
+## Quick Start
+
+1. **Edit config.yaml** with your data path
+2. **Run the workflow**:
+   ```bash
+   bash run_workflow.sh
+   ```
+
+That's it! The script will generate splits, train the model, and run inference.
+
+## Step-by-Step Guide
+
 ## Step 1: Generate Data Splits
 
-First, create reproducible train/val/test splits (80%/10%/10%):
+Create reproducible train/val/test splits (80%/10%/10%):
 
 ```bash
-python split.py \
-  --data-root /home/suraj/Data/Nemours/pickle \
-  --train-ratio 0.8 \
-  --val-ratio 0.1 \
-  --test-ratio 0.1 \
-  --seed 42 \
-  --output splits.json
+python split.py --config config.yaml
 ```
 
 **Output**: `splits.json` containing file paths for each split
 
-**Options**:
-- `--data-root`: Directory containing `.pkl` files
-- `--train-ratio`: Fraction for training (default: 0.8)
-- `--val-ratio`: Fraction for validation (default: 0.1)
-- `--test-ratio`: Fraction for testing (default: 0.1)
-- `--seed`: Random seed for reproducibility (default: 42)
-- `--output`: Output JSON file path (default: splits.json)
+**Manual override example**:
+```bash
+python split.py \
+  --config config.yaml \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15
+```
 
 ## Step 2: Train Model
 
-Train using the predefined splits:
+Train using the config file:
 
 ```bash
-python train.py \
-  --splits-file splits.json \
-  --epochs 50 \
-  --batch-size 4 \
-  --output-dir checkpoints \
-  --filter-empty 0.0 \
-  --score-threshold 0.05
+python train.py --config config.yaml
 ```
 
-**Key Options**:
-- `--splits-file`: Path to splits.json (uses predefined splits)
-- `--data-root`: If splits-file not provided, uses random split from this directory
-- `--epochs`: Number of training epochs
-- `--batch-size`: Training batch size (reduce if OOM errors)
-- `--filter-empty`: Fraction of empty images to remove from training (0.0-1.0)
-- `--score-threshold`: Score threshold for validation evaluation
+**Override examples**:
+```bash
+# Quick test with fewer epochs
+python train.py --config config.yaml --epochs 10 --batch-size 2
+
+# Full training run
+python train.py --config config.yaml --epochs 50 --batch-size 4
+```
 
 **Outputs**:
 - `checkpoints/best_model.pth`: Best model weights
 - `checkpoints/training_results.json`: Training history and metrics
 
-### Training Without Splits File (Legacy Mode)
-If you don't have `splits.json`, the script will use random splitting:
-
-```bash
-python train.py \
-  --data-root /home/suraj/Data/Nemours/pickle \
-  --val-ratio 0.2 \
-  --seed 42 \
-  --epochs 50
-```
-
 ## Step 3: Run Batch Inference
 
-Evaluate on the test set with comprehensive metrics:
+Evaluate on the test set:
 
 ```bash
 python batch_inference.py \
-  --checkpoint checkpoints/best_model.pth \
-  --splits-file splits.json \
-  --output-dir inference \
-  --score-threshold 0.5 \
-  --visualize-samples 10
+  --config config.yaml \
+  --checkpoint checkpoints/best_model.pth
 ```
 
-**Options**:
-- `--checkpoint`: Path to trained model `.pth` file
-- `--splits-file`: Path to splits.json (uses test split)
-- `--output-dir`: Directory for results (default: inference/)
-- `--score-threshold`: Confidence threshold for predictions (default: 0.5)
-- `--visualize-samples`: Number of samples to visualize (default: 10)
+**Override examples**:
+```bash
+# Higher confidence threshold
+python batch_inference.py \
+  --config config.yaml \
+  --checkpoint checkpoints/best_model.pth \
+  --score-threshold 0.7 \
+  --visualize-samples 20
+```
 
 **Outputs**:
 - `inference/test_metrics_YYYYMMDD_HHMMSS.json`: Comprehensive metrics
@@ -94,16 +87,28 @@ python batch_inference.py \
 - **mAP@0.5:0.95**: COCO-style mAP (average over IoU 0.5 to 0.95)
 - **TP, FP, FN, TN**: Confusion matrix components
 
-## Step 4: Single Sample Inference (Optional)
+## Configuration Management
 
-For quick testing on individual samples:
+### Default Config (config.yaml)
+All hyperparameters and paths are centralized:
+```yaml
+data:
+  root: "/home/suraj/Data/Nemours/pickle"
+  splits_file: "splits.json"
 
+training:
+  epochs: 50
+  batch_size: 4
+  learning_rate: 0.005
+  # ... more settings
+```
+
+See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for complete configuration documentation.
+
+### Command-Line Overrides
+All scripts accept `--config config.yaml` and support overriding specific values:
 ```bash
-python inference.py \
-  --checkpoint checkpoints/best_model.pth \
-  --sample /path/to/sample.pkl \
-  --score-threshold 0.5 \
-  --save-path results/prediction.png
+python train.py --config config.yaml --epochs 100 --batch-size 8
 ```
 
 ## Memory Management for Large GPUs

@@ -7,6 +7,8 @@ import random
 from pathlib import Path
 from typing import List, Dict
 
+import yaml
+
 
 def create_splits(
     data_root: Path,
@@ -102,54 +104,77 @@ def load_splits(splits_path: Path) -> Dict[str, List[str]]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate train/val/test splits for OCT dataset")
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Path to config YAML file (default: config.yaml)"
+    )
+    parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("/home/suraj/Data/Nemours/pickle"),
-        help="Root directory containing .pkl files"
+        default=None,
+        help="Root directory containing .pkl files (overrides config)"
     )
     parser.add_argument(
         "--train-ratio",
         type=float,
-        default=0.8,
-        help="Fraction of data for training (default: 0.8)"
+        default=None,
+        help="Fraction of data for training (overrides config)"
     )
     parser.add_argument(
         "--val-ratio",
         type=float,
-        default=0.1,
-        help="Fraction of data for validation (default: 0.1)"
+        default=None,
+        help="Fraction of data for validation (overrides config)"
     )
     parser.add_argument(
         "--test-ratio",
         type=float,
-        default=0.1,
-        help="Fraction of data for testing (default: 0.1)"
+        default=None,
+        help="Fraction of data for testing (overrides config)"
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)"
+        default=None,
+        help="Random seed for reproducibility (overrides config)"
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("splits.json"),
-        help="Output path for splits JSON file (default: splits.json)"
+        default=None,
+        help="Output path for splits JSON file (overrides config)"
     )
     return parser.parse_args()
+
+
+def load_config(config_path: Path) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 
 def main() -> None:
     args = parse_args()
     
+    # Load config file
+    config = load_config(args.config)
+    
+    # Command line arguments override config
+    data_root = args.data_root if args.data_root else Path(config["data"]["root"])
+    train_ratio = args.train_ratio if args.train_ratio is not None else config["splitting"]["train_ratio"]
+    val_ratio = args.val_ratio if args.val_ratio is not None else config["splitting"]["val_ratio"]
+    test_ratio = args.test_ratio if args.test_ratio is not None else config["splitting"]["test_ratio"]
+    seed = args.seed if args.seed is not None else config["splitting"]["seed"]
+    output_path = args.output if args.output else Path(config["output"]["splits_file"])
+    
     create_splits(
-        data_root=args.data_root,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        seed=args.seed,
-        output_path=args.output,
+        data_root=data_root,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+        output_path=output_path,
     )
 
 

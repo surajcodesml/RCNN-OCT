@@ -8,32 +8,55 @@ from typing import Dict, List
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 
-from dataset import OCTDetectionDataset, create_datasets, create_datasets_from_splits, detection_collate_fn
+from dataset import create_datasets_from_splits, detection_collate_fn
 from model import build_model
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Faster R-CNN on OCT data")
-    parser.add_argument("--data-root", type=Path, required=False, default=Path("/home/suraj/Data/Nemours/pickle"), help="Root directory containing .pkl files")
-    parser.add_argument("--splits-file", type=Path, default=None, help="Path to splits.json file (if provided, uses predefined splits)")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--val-ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=Path("checkpoints"))
-    parser.add_argument("--score-threshold", type=float, default=0.05,
-                        help="Score threshold for predictions during evaluation (default: 0.05)")
-    parser.add_argument("--filter-empty", type=float, default=0.0, 
-                        help="Fraction of empty images (no boxes) to remove from training set. "
-                             "0.0=keep all (default), 0.5=remove 50%%, 1.0=remove all empty images")
-    parser.add_argument("--max-samples", type=int, default=None,
-                        help="Limit total number of samples for quick testing. None=use all (default)")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.yaml"),
+        help="Path to config YAML file (default: config.yaml)"
+    )
+    parser.add_argument(
+        "--splits-file",
+        type=Path,
+        default=None,
+        help="Path to splits.json file (overrides config)"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (overrides config)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Training batch size (overrides config)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output directory for checkpoints (overrides config)"
+    )
     return parser.parse_args()
+
+
+def load_config(config_path: Path) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 
 def compute_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
@@ -248,29 +271,48 @@ def save_training_results(
 
 def main() -> None:
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load configuration
+    config = load_config(args.config)
+    print(f"Loaded configuration from {args.config}")
+    
+    # Override config with command line arguments
+    splits_file = args.splits_file if args.splits_file else Path(config["data"]["splits_file"])
+    epochs = args.epochs if args.epochs is not None else config["training"]["epochs"]
+    batch_size = args.batch_size if args.batch_size is not None else config["training"]["batch_size"]
+    output_dir = args.output_dir if args.output_dir else Path(config["output"]["checkpoints_dir"])
+    
+    # Training hyperparameters from config
+    learning_rate = config["training"]["learning_rate"]
+    momentum = config["training"]["momentum"]
+    weight_decay = config["training"]["weight_decay"]
+    lr_step_size = config["training"]["lr_scheduler_step_size"]
+    lr_gamma = config["training"]["lr_scheduler_gamma"]
+    num_workers = config["training"]["num_workers"]
+    pin_memory = config["training"]["pin_memory"]
+    patience = config["training"]["patience"]
+    filter_empty = config["training"]["filter_empty_ratio"]
+    score_threshold = config["training"]["score_threshold"]
+    seed = config["splitting"]["seed"]
+    
+    # Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() and config["device"]["cuda"] else "cpu")
     print(f"Using device: {device}")
 
-    print(f"Loading datasets from {args.data_root}...")
+    # Load datasets from splits file
+    if not splits_file.exists():
+        raise FileNotFoundError(
+            f"Splits file not found: {splits_file}\n"
+            f"Please run 'python split.py' first to generate the splits."
+        )
     
-    # Use splits file if provided, otherwise use random split
-    if args.splits_file is not None and args.splits_file.exists():
-        print(f"Using predefined splits from {args.splits_file}")
-        train_dataset, val_dataset, label_mapping = create_datasets_from_splits(
-            args.splits_file,
-            split_names=("train", "val"),
-            filter_empty_ratio=args.filter_empty,
-            seed=args.seed
-        )
-    else:
-        print(f"Using random split with val_ratio={args.val_ratio}")
-        train_dataset, val_dataset, label_mapping = create_datasets(
-            args.data_root, 
-            val_ratio=args.val_ratio, 
-            seed=args.seed,
-            filter_empty_ratio=args.filter_empty,
-            max_samples=args.max_samples
-        )
+    print(f"Loading datasets from {splits_file}...")
+    train_dataset, val_dataset, label_mapping = create_datasets_from_splits(
+        splits_file,
+        split_names=("train", "val"),
+        filter_empty_ratio=filter_empty,
+        seed=seed
+    )
     
     num_classes = len(label_mapping) + 1 if label_mapping else 2
 
@@ -280,48 +322,49 @@ def main() -> None:
     
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=args.batch_size, 
+        batch_size=batch_size, 
         shuffle=True, 
         collate_fn=detection_collate_fn,
-        num_workers=4,
-        pin_memory=True if torch.cuda.is_available() else False
-        )
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=1, 
         shuffle=False, 
         collate_fn=detection_collate_fn,
-        num_workers=2,
-        pin_memory=True if torch.cuda.is_available() else False 
-        )
+        num_workers=max(1, num_workers // 2),
+        pin_memory=pin_memory
+    )
 
     print("Building model...")
     model = build_model(num_classes=num_classes)
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = SGD(params, lr=0.005, momentum=0.9, weight_decay=5e-4)
-    lr_scheduler = StepLR(optimizer, step_size=5, gamma=0.1)
+    optimizer = SGD(params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
+    lr_scheduler = StepLR(optimizer, step_size=lr_step_size, gamma=lr_gamma)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     best_f1 = -1.0
-    best_path = args.output_dir / "best_model.pth"
-    #Early stopping
-    patience = 7  # Stop if no improvement for 7 epochs
+    best_path = output_dir / "best_model.pth"
     epochs_without_improvement = 0
     
     hyperparameters = {
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "val_ratio": args.val_ratio,
-        "seed": args.seed,
-        "score_threshold": args.score_threshold,
-        "filter_empty_ratio": args.filter_empty,
-        "learning_rate": 0.005,
-        "momentum": 0.9,
-        "weight_decay": 5e-4,
-        "lr_scheduler_step_size": 5,
-        "lr_scheduler_gamma": 0.1,
+        "config_file": str(args.config),
+        "splits_file": str(splits_file),
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "seed": seed,
+        "score_threshold": score_threshold,
+        "filter_empty_ratio": filter_empty,
+        "learning_rate": learning_rate,
+        "momentum": momentum,
+        "weight_decay": weight_decay,
+        "lr_scheduler_step_size": lr_step_size,
+        "lr_scheduler_gamma": lr_gamma,
+        "patience": patience,
+        "num_workers": num_workers,
         "num_classes": num_classes,
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
@@ -330,12 +373,12 @@ def main() -> None:
     }
     training_history = []
 
-    print(f"\nStarting training for {args.epochs} epochs...\n")
-    for epoch in range(1, args.epochs + 1):
+    print(f"\nStarting training for {epochs} epochs...\n")
+    for epoch in range(1, epochs + 1):
         loss_dict = train_one_epoch(model, optimizer, train_loader, device, epoch)
         lr_scheduler.step()
 
-        val_metrics = evaluate(model, val_loader, device, score_threshold=args.score_threshold)
+        val_metrics = evaluate(model, val_loader, device, score_threshold=score_threshold)
 
         epoch_results = {
             "epoch": epoch,
@@ -357,7 +400,7 @@ def main() -> None:
         training_history.append(epoch_results)
         
         print(
-            f"Epoch {epoch}/{args.epochs}: "  
+            f"Epoch {epoch}/{epochs}: "  
             f"loss={loss_dict['loss']:.4f}, "
             f"cls={loss_dict['loss_classifier']:.4f}, "
             f"box={loss_dict['loss_box_reg']:.4f}, "
@@ -395,7 +438,7 @@ def main() -> None:
         "final_val_mAP": training_history[-1]["val_mAP"],
     }
 
-    save_training_results(args.output_dir, hyperparameters, training_history, best_metrics)
+    save_training_results(output_dir, hyperparameters, training_history, best_metrics)
         
 
 if __name__ == "__main__":

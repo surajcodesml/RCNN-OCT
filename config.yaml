@@ -1,0 +1,58 @@
+# RCNN-OCT Configuration File
+# Central configuration for all scripts
+
+# Data paths
+data:
+  root: "/home/suraj/Data/Nemours/pickle"
+  splits_file: "splits.json"
+
+# Training hyperparameters
+training:
+  epochs: 50
+  batch_size: 4
+  learning_rate: 0.005
+  momentum: 0.9
+  weight_decay: 0.0005
+  lr_scheduler_step_size: 5
+  lr_scheduler_gamma: 0.1
+  num_workers: 4
+  pin_memory: true
+  
+  # Early stopping
+  patience: 7
+  
+  # Data filtering
+  filter_empty_ratio: 0.0  # Fraction of empty images to remove from training (0.0-1.0)
+  
+  # Evaluation
+  score_threshold: 0.05  # Threshold for validation during training
+
+# Data splitting (for split.py)
+splitting:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 42
+
+# Inference settings
+inference:
+  score_threshold: 0.5  # Higher threshold for final predictions
+  visualize_samples: 10
+  batch_size: 1
+
+# Output directories
+output:
+  checkpoints_dir: "checkpoints"
+  inference_dir: "inference"
+  splits_file: "splits.json"
+
+# Model settings
+model:
+  num_classes: null  # Will be determined from data
+  backbone: "resnet50"
+  pretrained: true
+
+# Device settings
+device:
+  cuda: true
+  gpu_id: 0
