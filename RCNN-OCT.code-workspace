@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../SCR-Progression"
+		},
+		{
+			"path": "../../Data/Nemours"
 		}
 	],
 	"settings": {}

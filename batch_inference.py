@@ -55,7 +55,9 @@ def compute_ap(precisions: np.ndarray, recalls: np.ndarray) -> float:
 def compute_metrics_at_iou(
     all_pred_boxes: List[np.ndarray],
     all_pred_scores: List[np.ndarray],
+    all_pred_labels: List[np.ndarray],
     all_gt_boxes: List[np.ndarray],
+    all_gt_labels: List[np.ndarray],
     iou_threshold: float = 0.5,
     score_threshold: float = 0.05,
 ) -> Dict[str, float]:
@@ -63,91 +65,173 @@ def compute_metrics_at_iou(
     Compute detection metrics at a specific IoU threshold.
     
     Returns:
-        Dictionary with precision, recall, f1, mAP, TP, FP, FN, TN
+        Dictionary with precision, recall, f1, mAP (overall and per-class), TP, FP, FN, TN
     """
-    # Compute TP, FP, FN at IoU threshold
+    # Compute TP, FP, FN at IoU threshold (overall)
     tp = fp = fn = tn = 0
     total_preds = 0
     
-    for pred_boxes, pred_scores, gt_boxes in zip(all_pred_boxes, all_pred_scores, all_gt_boxes):
+    # Per-class metrics
+    class_tp = {1: 0, 2: 0}  # Fovea: 1, SCR: 2
+    class_fp = {1: 0, 2: 0}
+    class_fn = {1: 0, 2: 0}
+    
+    for pred_boxes, pred_scores, pred_labels, gt_boxes, gt_labels in zip(
+        all_pred_boxes, all_pred_scores, all_pred_labels, all_gt_boxes, all_gt_labels
+    ):
         # Filter by score threshold
         keep = pred_scores >= score_threshold
         pred_boxes_filtered = pred_boxes[keep]
+        pred_labels_filtered = pred_labels[keep]
         
         total_preds += len(pred_boxes_filtered)
         
         matched_gt = set()
-        for pred_box in pred_boxes_filtered:
+        for pred_box, pred_label in zip(pred_boxes_filtered, pred_labels_filtered):
+            pred_class = int(pred_label)
+            
             if len(gt_boxes) == 0:
                 fp += 1
+                if pred_class in class_fp:
+                    class_fp[pred_class] += 1
                 continue
             
-            ious = [compute_iou(pred_box, gt_box) for gt_box in gt_boxes]
-            best_idx = int(np.argmax(ious))
+            # Find best matching GT box with same class
+            best_iou = 0.0
+            best_idx = -1
+            for gt_idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
+                if int(gt_label) == pred_class and gt_idx not in matched_gt:
+                    iou = compute_iou(pred_box, gt_box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_idx = gt_idx
             
-            if ious[best_idx] >= iou_threshold and best_idx not in matched_gt:
+            if best_iou >= iou_threshold and best_idx >= 0:
                 tp += 1
                 matched_gt.add(best_idx)
+                if pred_class in class_tp:
+                    class_tp[pred_class] += 1
             else:
                 fp += 1
+                if pred_class in class_fp:
+                    class_fp[pred_class] += 1
         
-        fn += len(gt_boxes) - len(matched_gt)
+        # Count unmatched GT boxes (FN) per class
+        for gt_idx, gt_label in enumerate(gt_labels):
+            if gt_idx not in matched_gt:
+                fn += 1
+                gt_class = int(gt_label)
+                if gt_class in class_fn:
+                    class_fn[gt_class] += 1
         
         # TN: Images without GT boxes where we correctly predict nothing
         if len(gt_boxes) == 0 and len(pred_boxes_filtered) == 0:
             tn += 1
     
-    # Compute mAP at this IoU threshold
-    all_pred_data = []
-    for pred_boxes, pred_scores, gt_boxes in zip(all_pred_boxes, all_pred_scores, all_gt_boxes):
-        for box, score in zip(pred_boxes, pred_scores):
-            all_pred_data.append((score, box, gt_boxes))
+    # Compute mAP at this IoU threshold (overall and per-class)
+    # Organize predictions by class
+    class_predictions = {1: [], 2: []}  # class_id: [(score, pred_box, image_idx)]
     
-    all_pred_data.sort(key=lambda x: x[0], reverse=True)
+    for img_idx, (pred_boxes, pred_scores, pred_labels) in enumerate(zip(all_pred_boxes, all_pred_scores, all_pred_labels)):
+        for box, score, label in zip(pred_boxes, pred_scores, pred_labels):
+            class_id = int(label)
+            if class_id in class_predictions:
+                class_predictions[class_id].append((score, box, img_idx))
     
-    # Compute precision-recall curve
-    tp_curve = 0
-    fp_curve = 0
-    precisions = []
-    recalls = []
-    total_gt = sum(len(gt) for gt in all_gt_boxes)
-    
-    matched_gts = [set() for _ in all_gt_boxes]
-    
-    for score, pred_box, gt_boxes in all_pred_data:
-        # Find which image this prediction belongs to
-        gt_idx = -1
-        for i, gts in enumerate(all_gt_boxes):
-            if np.array_equal(gt_boxes, gts):
-                gt_idx = i
-                break
+    # Compute per-class AP
+    class_ap = {}
+    for class_id in [1, 2]:  # Fovea: 1, SCR: 2
+        predictions = class_predictions[class_id]
+        predictions.sort(key=lambda x: x[0], reverse=True)
         
-        if len(gt_boxes) == 0:
-            fp_curve += 1
-        else:
-            ious = [compute_iou(pred_box, gt_box) for gt_box in gt_boxes]
-            best_idx = int(np.argmax(ious))
+        # Count GT boxes for this class
+        total_gt_class = sum(
+            np.sum(gt_labels == class_id) 
+            for gt_labels in all_gt_labels
+        )
+        
+        if total_gt_class == 0:
+            class_ap[class_id] = 0.0
+            continue
+        
+        # Track matched GT boxes per image
+        matched_gts_per_image = [set() for _ in all_gt_boxes]
+        
+        tp_curve = 0
+        fp_curve = 0
+        precisions = []
+        recalls = []
+        
+        for score, pred_box, img_idx in predictions:
+            gt_boxes = all_gt_boxes[img_idx]
+            gt_labels = all_gt_labels[img_idx]
             
-            if ious[best_idx] >= iou_threshold and best_idx not in matched_gts[gt_idx]:
-                tp_curve += 1
-                matched_gts[gt_idx].add(best_idx)
-            else:
+            # Filter GT boxes by class
+            class_mask = gt_labels == class_id
+            class_gt_boxes = gt_boxes[class_mask]
+            
+            if len(class_gt_boxes) == 0:
                 fp_curve += 1
+            else:
+                # Map local indices to original indices
+                class_indices = np.where(class_mask)[0]
+                
+                # Find best matching GT box
+                best_iou = 0.0
+                best_local_idx = -1
+                for local_idx, gt_box in enumerate(class_gt_boxes):
+                    original_idx = class_indices[local_idx]
+                    if original_idx not in matched_gts_per_image[img_idx]:
+                        iou = compute_iou(pred_box, gt_box)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_local_idx = local_idx
+                
+                if best_iou >= iou_threshold and best_local_idx >= 0:
+                    tp_curve += 1
+                    matched_gts_per_image[img_idx].add(class_indices[best_local_idx])
+                else:
+                    fp_curve += 1
+            
+            precision = tp_curve / (tp_curve + fp_curve) if (tp_curve + fp_curve) > 0 else 0.0
+            recall = tp_curve / total_gt_class if total_gt_class > 0 else 0.0
+            precisions.append(precision)
+            recalls.append(recall)
         
-        precision = tp_curve / (tp_curve + fp_curve) if (tp_curve + fp_curve) > 0 else 0.0
-        recall = tp_curve / total_gt if total_gt > 0 else 0.0
-        precisions.append(precision)
-        recalls.append(recall)
+        # Compute AP for this class
+        if len(precisions) > 0:
+            precisions = np.array(precisions)
+            recalls = np.array(recalls)
+            class_ap[class_id] = compute_ap(precisions, recalls)
+        else:
+            class_ap[class_id] = 0.0
     
-    # Compute mAP
-    if len(precisions) > 0:
-        precisions = np.array(precisions)
-        recalls = np.array(recalls)
-        mAP = compute_ap(precisions, recalls)
-    else:
-        mAP = 0.0
+    # Overall mAP is mean of per-class APs
+    mAP = np.mean(list(class_ap.values()))
     
-    # Final metrics
+    # Compute per-class precision, recall, F1
+    class_metrics = {}
+    for class_id in [1, 2]:
+        c_tp = class_tp[class_id]
+        c_fp = class_fp[class_id]
+        c_fn = class_fn[class_id]
+        
+        c_precision = c_tp / (c_tp + c_fp) if (c_tp + c_fp) > 0 else 0.0
+        c_recall = c_tp / (c_tp + c_fn) if (c_tp + c_fn) > 0 else 0.0
+        c_f1 = 2 * c_precision * c_recall / (c_precision + c_recall) if (c_precision + c_recall) > 0 else 0.0
+        
+        class_name = "Fovea" if class_id == 1 else "SCR"
+        class_metrics[class_name] = {
+            "precision": c_precision,
+            "recall": c_recall,
+            "f1": c_f1,
+            "ap": class_ap[class_id],
+            "tp": c_tp,
+            "fp": c_fp,
+            "fn": c_fn,
+        }
+    
+    # Final overall metrics
     precision = tp / (tp + fp) if tp + fp > 0 else 0.0
     recall = tp / (tp + fn) if tp + fn > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
@@ -162,6 +246,7 @@ def compute_metrics_at_iou(
         "fn": fn,
         "tn": tn,
         "total_predictions": total_preds,
+        "per_class": class_metrics,
     }
 
 
@@ -175,7 +260,16 @@ def visualize_detection(
     save_path: Path,
     sample_name: str,
 ) -> None:
-    """Visualize predictions vs ground truth."""
+    """Visualize predictions vs ground truth with color-coded labels.
+    
+    Color coding:
+        - Label 1 (Fovea): Green
+        - Label 2 (SCR): Red
+    """
+    # Label names and colors
+    label_names = {1: "Fovea", 2: "SCR"}
+    label_colors = {1: "green", 2: "red"}
+    
     # Convert image to numpy
     if image.dim() == 3 and image.shape[0] == 3:
         image_np = image[0].cpu().numpy()
@@ -186,31 +280,53 @@ def visualize_detection(
     
     # Plot ground truth
     ax1.imshow(image_np, cmap="gray")
-    ax1.set_title(f"Ground Truth - {sample_name}", fontsize=12)
+    ax1.set_title(f"Ground Truth - {sample_name}", fontsize=14, fontweight="bold")
     ax1.axis("off")
     
     for box, label in zip(gt_boxes, gt_labels):
+        label_int = int(label)
+        color = label_colors.get(label_int, "yellow")
+        label_text = label_names.get(label_int, f"Class {label_int}")
+        
         x1, y1, x2, y2 = box
         rect = patches.Rectangle(
             (x1, y1), x2 - x1, y2 - y1,
-            linewidth=2, edgecolor="green", facecolor="none"
+            linewidth=2.5, edgecolor=color, facecolor="none", linestyle="-"
         )
         ax1.add_patch(rect)
-        ax1.text(x1, y1 - 5, f"GT:{int(label)}", color="green", fontsize=10, weight="bold")
+        
+        # Add label with background
+        bbox_props = dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.7, edgecolor="none")
+        ax1.text(
+            x1, y1 - 8, f"GT: {label_text}", 
+            color="white", fontsize=10, weight="bold", 
+            bbox=bbox_props, verticalalignment="top"
+        )
     
     # Plot predictions
     ax2.imshow(image_np, cmap="gray")
-    ax2.set_title(f"Predictions - {sample_name}", fontsize=12)
+    ax2.set_title(f"Predictions - {sample_name}", fontsize=14, fontweight="bold")
     ax2.axis("off")
     
     for box, score, label in zip(pred_boxes, pred_scores, pred_labels):
+        label_int = int(label)
+        color = label_colors.get(label_int, "yellow")
+        label_text = label_names.get(label_int, f"Class {label_int}")
+        
         x1, y1, x2, y2 = box
         rect = patches.Rectangle(
             (x1, y1), x2 - x1, y2 - y1,
-            linewidth=2, edgecolor="red", facecolor="none"
+            linewidth=2.5, edgecolor=color, facecolor="none", linestyle="-"
         )
         ax2.add_patch(rect)
-        ax2.text(x1, y1 - 5, f"{int(label)}:{score:.2f}", color="red", fontsize=10, weight="bold")
+        
+        # Add label with background
+        bbox_props = dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.7, edgecolor="none")
+        ax2.text(
+            x1, y1 - 8, f"{label_text}: {score:.2f}", 
+            color="white", fontsize=10, weight="bold", 
+            bbox=bbox_props, verticalalignment="top"
+        )
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -285,20 +401,28 @@ def batch_inference(
     # Compute metrics at IoU=0.5 and IoU=0.5:0.95
     print("\nComputing metrics...")
     metrics_05 = compute_metrics_at_iou(
-        all_pred_boxes, all_pred_scores, all_gt_boxes,
+        all_pred_boxes, all_pred_scores, all_pred_labels, all_gt_boxes, all_gt_labels,
         iou_threshold=0.5, score_threshold=score_threshold
     )
     
     # Compute mAP@0.5:0.95 (average over IoU thresholds 0.5, 0.55, ..., 0.95)
-    map_scores = []
+    # Overall and per-class
+    map_scores_overall = []
+    map_scores_fovea = []
+    map_scores_scr = []
+    
     for iou_thresh in np.arange(0.5, 1.0, 0.05):
         metrics_temp = compute_metrics_at_iou(
-            all_pred_boxes, all_pred_scores, all_gt_boxes,
+            all_pred_boxes, all_pred_scores, all_pred_labels, all_gt_boxes, all_gt_labels,
             iou_threshold=iou_thresh, score_threshold=score_threshold
         )
-        map_scores.append(metrics_temp["mAP"])
+        map_scores_overall.append(metrics_temp["mAP"])
+        map_scores_fovea.append(metrics_temp["per_class"]["Fovea"]["ap"])
+        map_scores_scr.append(metrics_temp["per_class"]["SCR"]["ap"])
     
-    map_50_95 = np.mean(map_scores)
+    map_50_95_overall = np.mean(map_scores_overall)
+    map_50_95_fovea = np.mean(map_scores_fovea)
+    map_50_95_scr = np.mean(map_scores_scr)
     
     # Compile all metrics
     results = {
@@ -314,24 +438,40 @@ def batch_inference(
             "fn": metrics_05["fn"],
             "tn": metrics_05["tn"],
             "total_predictions": metrics_05["total_predictions"],
+            "per_class": metrics_05["per_class"],
         },
-        "mAP@0.5:0.95": map_50_95,
+        "mAP@0.5:0.95": {
+            "overall": map_50_95_overall,
+            "Fovea": map_50_95_fovea,
+            "SCR": map_50_95_scr,
+        },
     }
     
     # Save metrics to JSON
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    metrics_path = output_dir / f"test_metrics_{timestamp}.json"
+    metrics_path = output_dir / f"inference_metrics_{timestamp}.json"
     with open(metrics_path, "w") as f:
         json.dump(results, f, indent=2)
     
     print(f"\n{'='*60}")
     print(f"Test Results (IoU=0.5, score_threshold={score_threshold})")
     print(f"{'='*60}")
-    print(f"Precision: {metrics_05['precision']:.4f}")
-    print(f"Recall:    {metrics_05['recall']:.4f}")
-    print(f"F1 Score:  {metrics_05['f1']:.4f}")
-    print(f"mAP@0.5:   {metrics_05['mAP']:.4f}")
-    print(f"mAP@0.5:0.95: {map_50_95:.4f}")
+    print(f"Overall Metrics:")
+    print(f"  Precision: {metrics_05['precision']:.4f}")
+    print(f"  Recall:    {metrics_05['recall']:.4f}")
+    print(f"  F1 Score:  {metrics_05['f1']:.4f}")
+    print(f"  mAP@0.5:   {metrics_05['mAP']:.4f}")
+    print(f"  mAP@0.5:0.95: {map_50_95_overall:.4f}")
+    print(f"\nPer-Class Metrics (IoU=0.5):")
+    for class_name, class_metrics in metrics_05["per_class"].items():
+        print(f"  {class_name}:")
+        print(f"    Precision: {class_metrics['precision']:.4f}")
+        print(f"    Recall:    {class_metrics['recall']:.4f}")
+        print(f"    F1 Score:  {class_metrics['f1']:.4f}")
+        print(f"    AP@0.5:    {class_metrics['ap']:.4f}")
+    print(f"\nPer-Class mAP@0.5:0.95:")
+    print(f"  Fovea: {map_50_95_fovea:.4f}")
+    print(f"  SCR:   {map_50_95_scr:.4f}")
     print(f"\nConfusion Matrix:")
     print(f"  TP: {metrics_05['tp']}")
     print(f"  FP: {metrics_05['fp']}")
