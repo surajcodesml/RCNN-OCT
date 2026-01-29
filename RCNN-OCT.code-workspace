@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../../Data/Nemours"
+		},
+		{
+			"path": "../YOLOv11-OCT"
 		}
 	],
 	"settings": {}
